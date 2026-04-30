@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<title>cdn-star-logo — embed demo</title>
+	<style>
+		body {
+			margin: 0;
+			min-height: 100vh;
+			background: #00002a;
+			color: #ede5d4;
+			font-family: system-ui, sans-serif;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			padding: 32px;
+			gap: 32px;
+		}
+		h1 { font-weight: 300; letter-spacing: 0.04em; }
+		.demos {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+			gap: 32px;
+			width: 100%;
+			max-width: 1200px;
+		}
+		.tile {
+			background: rgba(144, 96, 240, 0.08);
+			border: 1px solid rgba(144, 96, 240, 0.2);
+			border-radius: 12px;
+			padding: 16px;
+			display: flex;
+			flex-direction: column;
+			gap: 12px;
+		}
+		.tile cdn-star-logo {
+			height: 240px;
+			width: 100%;
+			border-radius: 8px;
+			overflow: hidden;
+		}
+		.tile h3 { margin: 0; font-size: 14px; font-weight: 500; opacity: 0.8; }
+		.tile code { font-size: 12px; opacity: 0.6; }
+	</style>
+</head>
+<body>
+	<h1>&lt;cdn-star-logo&gt;</h1>
+
+	<div class="demos">
+		<div class="tile">
+			<h3>default</h3>
+			<cdn-star-logo></cdn-star-logo>
+			<code>&lt;cdn-star-logo&gt;&lt;/cdn-star-logo&gt;</code>
+		</div>
+
+		<div class="tile">
+			<h3>transparent background</h3>
+			<cdn-star-logo transparent></cdn-star-logo>
+			<code>&lt;cdn-star-logo transparent&gt;</code>
+		</div>
+
+		<div class="tile">
+			<h3>no idle rotation</h3>
+			<cdn-star-logo no-rotate></cdn-star-logo>
+			<code>&lt;cdn-star-logo no-rotate&gt;</code>
+		</div>
+	</div>
+
+	<script type="module" src="../src/index.ts"></script>
+</body>
+</html>
