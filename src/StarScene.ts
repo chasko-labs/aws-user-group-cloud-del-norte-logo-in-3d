@@ -1,7 +1,13 @@
 // Procedural 3D Cloud Del Norte star scene.
-// 5-pointed extruded star + 12-bulb ring with per-bulb point lights, glow layer,
-// and staggered breathing animation. No external assets — built from VertexData
-// and primitives at runtime.
+// 5-pointed extruded star + 16 independent bulbs across 4 categories:
+//   - 5 tip bulbs (outer vertices, larger — silhouette anchors)
+//   - 1 center bulb
+//   - 5 arm bulbs (0.45 interpolation along each arm, decorative)
+//   - 5 diagonal bulbs (inner valley vertices, accent only)
+//
+// Nav bar context is always dark. Single palette — no light-mode swap.
+// Animation cycles slowed ~50% from original for calm heartbeat rhythm.
+// No bulb counter-rotation — star body spin alone reads cleanest at small size.
 
 // Side-effect: patches Scene.prototype.beginAnimation. Required because in
 // some bundling/load-order scenarios this prototype method may not be patched
@@ -14,6 +20,7 @@ import { Scene } from "@babylonjs/core/scene";
 import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { PointLight } from "@babylonjs/core/Lights/pointLight";
+import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
@@ -24,16 +31,47 @@ import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
 import { Animation } from "@babylonjs/core/Animations/animation";
 import { SineEase, EasingFunction } from "@babylonjs/core/Animations/easing";
 
-// Brand palette
-const VIOLET = new Color3(0.628, 0.392, 0.956); // #A064F4 — bulbs + glow
-const PURPLE = new Color3(0.353, 0.122, 0.541); // #5A1F8A — star body
-const NAVY = new Color4(0.0, 0.0, 0.165, 1.0); // #00002A — scene clear
+// ── Brand palette ─────────────────────────────────────────────────────────────
+
+const VIOLET      = new Color3(0.628, 0.392, 0.956); // #A064F4 — bulbs + glow
+const WHITE_VIOLET = new Color3(0.88, 0.78, 1.0);    // near-white lavender diagonal accent
+const PURPLE      = new Color3(0.353, 0.122, 0.541); // #5A1F8A — star body
+const NAVY        = new Color4(0.0, 0.0, 0.165, 1.0); // #00002A — scene clear
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export type BulbCategory = "tip" | "center" | "arm" | "diagonal";
+
+export interface BulbMetadata {
+	category: BulbCategory;
+	index: number;
+}
 
 export interface StarSceneOptions {
 	autoRotate?: boolean;
-	bulbCount?: number;
 	transparentBackground?: boolean;
 }
+
+// ── Animation rhythms — slowed ~50% for calm heartbeat ───────────────────────
+
+const CATEGORY_RHYTHM: Record<
+	BulbCategory,
+	{ cycleFrames: number; minEmissive: number; maxEmissive: number }
+> = {
+	tip:      { cycleFrames: 140, minEmissive: 0.6,  maxEmissive: 2.6 },
+	center:   { cycleFrames: 100, minEmissive: 0.8,  maxEmissive: 2.2 },
+	arm:      { cycleFrames: 80,  minEmissive: 0.2,  maxEmissive: 1.2 },
+	diagonal: { cycleFrames: 90,  minEmissive: 0.15, maxEmissive: 1.0 },
+};
+
+const PHASE_OFFSETS: Record<BulbCategory, number[]> = {
+	tip:      [0.0, 0.18, 0.4, 0.6, 0.8],
+	center:   [0.35],
+	arm:      [0.0, 0.22, 0.44, 0.66, 0.88],
+	diagonal: [0.1, 0.3, 0.5, 0.7, 0.9],
+};
+
+// ── Scene class ───────────────────────────────────────────────────────────────
 
 export class StarScene {
 	readonly engine: Engine;
@@ -42,11 +80,11 @@ export class StarScene {
 	readonly star: Mesh;
 	readonly bulbs: Mesh[];
 	private readonly opts: Required<StarSceneOptions>;
+	private glow!: GlowLayer;
 
 	constructor(canvas: HTMLCanvasElement, options: StarSceneOptions = {}) {
 		this.opts = {
 			autoRotate: options.autoRotate ?? true,
-			bulbCount: options.bulbCount ?? 12,
 			transparentBackground: options.transparentBackground ?? false,
 		};
 
@@ -64,7 +102,7 @@ export class StarScene {
 		this.camera = this.makeCamera(canvas);
 		this.makeAmbient();
 		this.star = this.makeStar();
-		this.bulbs = this.makeBulbRing();
+		this.bulbs = this.makeBulbs();
 		this.attachBulbLights();
 		this.attachGlowLayer();
 		this.attachAnimations();
@@ -82,33 +120,55 @@ export class StarScene {
 		this.engine.resize();
 	}
 
-	// ── Scene composition ────────────────────────────────────────────────
+	// ── Camera ────────────────────────────────────────────────────────────────
 
 	private makeCamera(canvas: HTMLCanvasElement): ArcRotateCamera {
 		const cam = new ArcRotateCamera(
 			"cam",
-			-Math.PI / 2, // alpha — face front
-			Math.PI / 2.1, // beta — slight downward tilt
-			4.2, // radius
+			-Math.PI / 2,
+			Math.PI / 2.1,
+			4.2,
 			Vector3.Zero(),
 			this.scene,
 		);
 		cam.lowerRadiusLimit = 2.5;
 		cam.upperRadiusLimit = 8;
 		cam.wheelDeltaPercentage = 0.01;
+		// Telephoto compression: narrower FOV reads more iconic at small CSS size
+		cam.fov = 0.4;
 		cam.attachControl(canvas, true);
 		return cam;
 	}
 
+	// ── Lighting ──────────────────────────────────────────────────────────────
+
 	private makeAmbient(): void {
-		const hemi = new HemisphericLight(
-			"hemi",
-			new Vector3(0, 1, 0),
-			this.scene,
-		);
+		const hemi = new HemisphericLight("hemi", new Vector3(0, 1, 0), this.scene);
 		hemi.intensity = 0.35;
 		hemi.diffuse = new Color3(0.7, 0.6, 0.95);
 		hemi.groundColor = new Color3(0.2, 0.1, 0.3);
+
+		// Rim light from above-behind — gives star silhouette edge against dark surface
+		const rim = new DirectionalLight("rim", new Vector3(0, -0.5, -1), this.scene);
+		rim.diffuse = new Color3(0.65, 0.55, 0.9);
+		rim.intensity = 0.3;
+	}
+
+	// ── Star mesh ─────────────────────────────────────────────────────────────
+
+	/** Alternating outer/inner vertices: [outer0, inner0, outer1, inner1, ...] */
+	private starVertices(
+		points: number,
+		outerR: number,
+		innerR: number,
+	): { x: number; z: number }[] {
+		const verts: { x: number; z: number }[] = [];
+		for (let i = 0; i < points * 2; i++) {
+			const angle = (i / (points * 2)) * Math.PI * 2 - Math.PI / 2;
+			const r = i % 2 === 0 ? outerR : innerR;
+			verts.push({ x: Math.cos(angle) * r, z: Math.sin(angle) * r });
+		}
+		return verts;
 	}
 
 	private makeStar(): Mesh {
@@ -124,7 +184,6 @@ export class StarScene {
 		positions.push(0, depth / 2, 0);
 		positions.push(0, -depth / 2, 0);
 
-		// Front ring (indices 2..2+10) and back ring (indices 12..12+10)
 		for (let face = 0; face < 2; face++) {
 			const y = face === 0 ? depth / 2 : -depth / 2;
 			for (let i = 0; i < points * 2; i++) {
@@ -138,13 +197,13 @@ export class StarScene {
 		const frontStart = 2;
 		const backStart = 2 + ringLen;
 
-		// Front face — fan from center
+		// Front face fan
 		for (let i = 0; i < ringLen; i++) {
 			const a = frontStart + i;
 			const b = frontStart + ((i + 1) % ringLen);
 			indices.push(0, a, b);
 		}
-		// Back face — fan from center, reverse winding
+		// Back face fan (reversed winding)
 		for (let i = 0; i < ringLen; i++) {
 			const a = backStart + i;
 			const b = backStart + ((i + 1) % ringLen);
@@ -173,103 +232,175 @@ export class StarScene {
 		mat.albedoColor = PURPLE;
 		mat.metallic = 0.35;
 		mat.roughness = 0.32;
-		mat.emissiveColor = PURPLE.scale(0.45);
-		mat.emissiveIntensity = 0.5;
+		// Bumped emissive so silhouette reads against dark nav (was 0.45 scale / 0.5 intensity)
+		mat.emissiveColor = PURPLE.scale(0.7);
+		mat.emissiveIntensity = 0.85;
 		mesh.material = mat;
 
 		return mesh;
 	}
 
-	private makeBulbRing(): Mesh[] {
-		const radius = 1.32;
-		const bulbs: Mesh[] = [];
-		const mat = new PBRMaterial("bulbMat", this.scene);
-		mat.albedoColor = VIOLET;
-		mat.emissiveColor = VIOLET;
-		mat.emissiveIntensity = 2.4;
-		mat.metallic = 0.0;
-		mat.roughness = 0.35;
+	// ── Bulbs ─────────────────────────────────────────────────────────────────
 
-		for (let i = 0; i < this.opts.bulbCount; i++) {
-			const angle = (i / this.opts.bulbCount) * Math.PI * 2 - Math.PI / 2;
-			const bulb = MeshBuilder.CreateSphere(
-				`bulb_${i}`,
-				{ diameter: 0.16, segments: 16 },
+	private makeBulbs(): Mesh[] {
+		const points = 5;
+		const outer = 1.0;
+		const inner = 0.42;
+		const surfaceY = 0.09;
+		const verts = this.starVertices(points, outer, inner);
+
+		const bulbs: Mesh[] = [];
+
+		// One shared material per category — minimizes draw-call overhead
+		const tipMat    = this.makeBulbMat("tipMat",    VIOLET,       2.4, 0.0, 0.35);
+		const centerMat = this.makeBulbMat("centerMat", VIOLET,       2.2, 0.0, 0.4);
+		const armMat    = this.makeBulbMat("armMat",    VIOLET,       1.2, 0.0, 0.45);
+		const diagMat   = this.makeBulbMat("diagMat",   WHITE_VIOLET, 1.0, 0.0, 0.3);
+
+		// 5 TIP bulbs — larger for silhouette anchoring
+		for (let i = 0; i < points; i++) {
+			const v = verts[i * 2];
+			const b = MeshBuilder.CreateSphere(
+				`bulb_tip_${i}`,
+				{ diameter: 0.18, segments: 12 },
 				this.scene,
 			);
-			bulb.position = new Vector3(
-				Math.cos(angle) * radius,
-				0,
-				Math.sin(angle) * radius,
-			);
-			bulb.material = mat;
-			bulbs.push(bulb);
+			b.position = new Vector3(v.x, surfaceY, v.z);
+			b.material = tipMat;
+			b.metadata = { category: "tip", index: i } satisfies BulbMetadata;
+			bulbs.push(b);
 		}
+
+		// 1 CENTER bulb — largest single point
+		const cb = MeshBuilder.CreateSphere(
+			"bulb_center",
+			{ diameter: 0.22, segments: 12 },
+			this.scene,
+		);
+		cb.position = new Vector3(0, surfaceY, 0);
+		cb.material = centerMat;
+		cb.metadata = { category: "center", index: 0 } satisfies BulbMetadata;
+		bulbs.push(cb);
+
+		// 5 ARM bulbs — decorative filler
+		const armT = 0.45;
+		for (let i = 0; i < points; i++) {
+			const v = verts[i * 2];
+			const b = MeshBuilder.CreateSphere(
+				`bulb_arm_${i}`,
+				{ diameter: 0.065, segments: 10 },
+				this.scene,
+			);
+			b.position = new Vector3(v.x * armT, surfaceY, v.z * armT);
+			b.material = armMat;
+			b.metadata = { category: "arm", index: i } satisfies BulbMetadata;
+			bulbs.push(b);
+		}
+
+		// 5 DIAGONAL bulbs — inner valley accent
+		for (let i = 0; i < points; i++) {
+			const v = verts[i * 2 + 1];
+			const b = MeshBuilder.CreateSphere(
+				`bulb_diag_${i}`,
+				{ diameter: 0.07, segments: 10 },
+				this.scene,
+			);
+			b.position = new Vector3(v.x, surfaceY + 0.02, v.z);
+			b.material = diagMat;
+			b.metadata = { category: "diagonal", index: i } satisfies BulbMetadata;
+			bulbs.push(b);
+		}
+
 		return bulbs;
 	}
 
+	private makeBulbMat(
+		name: string,
+		color: Color3,
+		emissiveIntensity: number,
+		metallic: number,
+		roughness: number,
+	): PBRMaterial {
+		const mat = new PBRMaterial(name, this.scene);
+		mat.albedoColor = color;
+		mat.emissiveColor = color;
+		mat.emissiveIntensity = emissiveIntensity;
+		mat.metallic = metallic;
+		mat.roughness = roughness;
+		return mat;
+	}
+
 	private attachBulbLights(): void {
-		this.bulbs.forEach((bulb, i) => {
-			const light = new PointLight(`bulbLight_${i}`, bulb.position, this.scene);
-			light.diffuse = VIOLET;
-			light.specular = VIOLET.scale(0.5);
-			light.intensity = 0.45;
-			light.range = 1.4;
-		});
+		// One point light per tip bulb + one center — keeps light count low
+		this.bulbs
+			.filter((b) => (b.metadata as BulbMetadata).category === "tip")
+			.forEach((b, i) => {
+				const l = new PointLight(`tipLight_${i}`, b.position, this.scene);
+				l.diffuse = VIOLET;
+				l.specular = VIOLET.scale(0.4);
+				l.intensity = 0.35;
+				l.range = 1.2;
+			});
+
+		const cl = new PointLight("centerLight", Vector3.Zero(), this.scene);
+		cl.diffuse = VIOLET;
+		cl.specular = VIOLET.scale(0.4);
+		cl.intensity = 0.5;
+		cl.range = 1.5;
 	}
 
 	private attachGlowLayer(): void {
-		const glow = new GlowLayer("glow", this.scene, { mainTextureSamples: 2 });
-		glow.intensity = 1.5;
-		// Only the bulbs contribute to glow; star body stays matte
-		glow.referenceMeshToUseItsOwnMaterial(this.star);
+		this.glow = new GlowLayer("glow", this.scene, { mainTextureSamples: 2 });
+		// Fixed intensity — context is always a dark nav surface
+		this.glow.intensity = 1.2;
+		// Star body excluded — stays matte
+		this.glow.referenceMeshToUseItsOwnMaterial(this.star);
 	}
 
+	// ── Per-bulb animation ────────────────────────────────────────────────────
+	// Keyframe curve: bright → hold → dim → cold floor → warming → bright
+	// Phase offset applied as fractional frame start. Arm scale-shimmer removed.
+
 	private attachAnimations(): void {
-		// Bulb pulse — staggered 30 frame cycle, each bulb offset by (i / count) * 30
 		const fps = 30;
-		const cycleFrames = 60;
 		const ease = new SineEase();
 		ease.setEasingMode(EasingFunction.EASINGMODE_EASEINOUT);
 
-		this.bulbs.forEach((bulb, i) => {
-			const baseScale = bulb.scaling.clone();
-			const peak = baseScale.scale(1.4);
+		for (const bulb of this.bulbs) {
+			const meta = bulb.metadata as BulbMetadata;
+			const { cycleFrames, minEmissive, maxEmissive } =
+				CATEGORY_RHYTHM[meta.category];
 
-			const scaleAnim = new Animation(
-				`pulse_${i}`,
-				"scaling",
+			const anim = new Animation(
+				`emissive_${bulb.name}`,
+				"material.emissiveIntensity",
 				fps,
-				Animation.ANIMATIONTYPE_VECTOR3,
+				Animation.ANIMATIONTYPE_FLOAT,
 				Animation.ANIMATIONLOOPMODE_CYCLE,
 			);
-			scaleAnim.setKeys([
-				{ frame: 0, value: baseScale },
-				{ frame: cycleFrames / 2, value: peak },
-				{ frame: cycleFrames, value: baseScale },
+
+			anim.setKeys([
+				{ frame: 0,                              value: maxEmissive },
+				{ frame: Math.round(cycleFrames * 0.28), value: maxEmissive * 0.95 },
+				{ frame: Math.round(cycleFrames * 0.42), value: maxEmissive * 0.55 },
+				{ frame: Math.round(cycleFrames * 0.62), value: minEmissive },
+				{ frame: Math.round(cycleFrames * 0.78), value: maxEmissive * 0.7 },
+				{ frame: cycleFrames,                    value: maxEmissive },
 			]);
-			scaleAnim.setEasingFunction(ease);
+			anim.setEasingFunction(ease);
 
-			// Per-bulb stagger via per-bulb starting frame offset
-			const offsetFrame =
-				(i / this.opts.bulbCount) * cycleFrames;
-			bulb.animations = [scaleAnim];
-			this.scene.beginAnimation(bulb, offsetFrame, cycleFrames + offsetFrame, true);
-		});
+			const phaseFraction = PHASE_OFFSETS[meta.category][meta.index] ?? 0;
+			const fromFrame = Math.round(phaseFraction * cycleFrames);
 
-		// Star idle rotation — slow Y spin
+			bulb.animations = [anim];
+			// beginAnimation(target, from, to, loop) — Babylon.js 7.x
+			this.scene.beginAnimation(bulb, fromFrame, cycleFrames + fromFrame, true);
+		}
+
+		// Star idle Y-rotation only — no bulb counter-rotation
 		if (this.opts.autoRotate) {
 			this.scene.registerBeforeRender(() => {
 				this.star.rotation.y += 0.003;
-				// Bulb ring counter-rotates slightly for visual depth
-				this.bulbs.forEach((bulb) => {
-					const p = bulb.position;
-					const angle = Math.atan2(p.z, p.x);
-					const r = Math.sqrt(p.x * p.x + p.z * p.z);
-					const next = angle - 0.0015;
-					bulb.position.x = Math.cos(next) * r;
-					bulb.position.z = Math.sin(next) * r;
-				});
 			});
 		}
 	}
