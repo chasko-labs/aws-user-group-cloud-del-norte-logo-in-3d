@@ -1,9 +1,6 @@
 // Procedural 3D Cloud Del Norte star scene.
-// 5-pointed extruded star + 16 independent bulbs across 4 categories:
-//   - 5 tip bulbs (outer vertices, larger — silhouette anchors)
-//   - 1 center bulb
-//   - 5 arm bulbs (0.45 interpolation along each arm, decorative)
-//   - 5 diagonal bulbs (inner valley vertices, accent only)
+// 5-pointed extruded star + 6 bulbs: 5 tips + 1 steady center.
+// Arm and diagonal bulbs removed — they contributed to blob at nav thumbnail size.
 //
 // Nav bar context is always dark. Single palette — no light-mode swap.
 // Animation cycles slowed ~50% from original for calm heartbeat rhythm.
@@ -20,7 +17,6 @@ import { Scene } from "@babylonjs/core/scene";
 import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { PointLight } from "@babylonjs/core/Lights/pointLight";
-import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
@@ -33,14 +29,14 @@ import { SineEase, EasingFunction } from "@babylonjs/core/Animations/easing";
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
 
-const VIOLET      = new Color3(0.628, 0.392, 0.956); // #A064F4 — bulbs + glow
-const WHITE_VIOLET = new Color3(0.88, 0.78, 1.0);    // near-white lavender diagonal accent
-const PURPLE      = new Color3(0.353, 0.122, 0.541); // #5A1F8A — star body
-const NAVY        = new Color4(0.0, 0.0, 0.165, 1.0); // #00002A — scene clear
+const VIOLET = new Color3(0.628, 0.392, 0.956); // #A064F4 — bulbs + glow
+const PURPLE = new Color3(0.353, 0.122, 0.541); // #5A1F8A — star body
+const NAVY   = new Color4(0.0, 0.0, 0.165, 1.0); // #00002A — scene clear
+// WHITE_VIOLET removed with diagonal bulbs
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type BulbCategory = "tip" | "center" | "arm" | "diagonal";
+export type BulbCategory = "tip" | "center";
 
 export interface BulbMetadata {
 	category: BulbCategory;
@@ -58,17 +54,15 @@ const CATEGORY_RHYTHM: Record<
 	BulbCategory,
 	{ cycleFrames: number; minEmissive: number; maxEmissive: number }
 > = {
-	tip:      { cycleFrames: 140, minEmissive: 0.6,  maxEmissive: 2.6 },
-	center:   { cycleFrames: 100, minEmissive: 0.8,  maxEmissive: 2.2 },
-	arm:      { cycleFrames: 80,  minEmissive: 0.2,  maxEmissive: 1.2 },
-	diagonal: { cycleFrames: 90,  minEmissive: 0.15, maxEmissive: 1.0 },
+	// Tip: primary visual anchors — slow heartbeat, dimmer max so glow never blows out silhouette
+	tip:    { cycleFrames: 140, minEmissive: 0.3, maxEmissive: 1.6 },
+	// Center: steady — min == max, no pulse
+	center: { cycleFrames: 100, minEmissive: 1.0, maxEmissive: 1.0 },
 };
 
 const PHASE_OFFSETS: Record<BulbCategory, number[]> = {
-	tip:      [0.0, 0.18, 0.4, 0.6, 0.8],
-	center:   [0.35],
-	arm:      [0.0, 0.22, 0.44, 0.66, 0.88],
-	diagonal: [0.1, 0.3, 0.5, 0.7, 0.9],
+	tip:    [0.0, 0.18, 0.4, 0.6, 0.8],
+	center: [0.0],
 };
 
 // ── Scene class ───────────────────────────────────────────────────────────────
@@ -134,8 +128,8 @@ export class StarScene {
 		cam.lowerRadiusLimit = 2.5;
 		cam.upperRadiusLimit = 8;
 		cam.wheelDeltaPercentage = 0.01;
-		// Telephoto compression: narrower FOV reads more iconic at small CSS size
-		cam.fov = 0.4;
+		// Default FOV — telephoto was a bandaid for unreadable silhouette at small size
+		cam.fov = 0.8;
 		cam.attachControl(canvas, true);
 		return cam;
 	}
@@ -147,11 +141,7 @@ export class StarScene {
 		hemi.intensity = 0.35;
 		hemi.diffuse = new Color3(0.7, 0.6, 0.95);
 		hemi.groundColor = new Color3(0.2, 0.1, 0.3);
-
-		// Rim light from above-behind — gives star silhouette edge against dark surface
-		const rim = new DirectionalLight("rim", new Vector3(0, -0.5, -1), this.scene);
-		rim.diffuse = new Color3(0.65, 0.55, 0.9);
-		rim.intensity = 0.3;
+		// Rim DirectionalLight removed — hemi alone is sufficient at >=200px render size
 	}
 
 	// ── Star mesh ─────────────────────────────────────────────────────────────
@@ -246,23 +236,22 @@ export class StarScene {
 		const points = 5;
 		const outer = 1.0;
 		const inner = 0.42;
-		const surfaceY = 0.09;
+		const surfaceY = 0.09; // above star face (depth/2)
 		const verts = this.starVertices(points, outer, inner);
 
 		const bulbs: Mesh[] = [];
 
 		// One shared material per category — minimizes draw-call overhead
-		const tipMat    = this.makeBulbMat("tipMat",    VIOLET,       2.4, 0.0, 0.35);
-		const centerMat = this.makeBulbMat("centerMat", VIOLET,       2.2, 0.0, 0.4);
-		const armMat    = this.makeBulbMat("armMat",    VIOLET,       1.2, 0.0, 0.45);
-		const diagMat   = this.makeBulbMat("diagMat",   WHITE_VIOLET, 1.0, 0.0, 0.3);
+		const tipMat    = this.makeBulbMat("tipMat",    VIOLET, 1.6, 0.0, 0.35);
+		const centerMat = this.makeBulbMat("centerMat", VIOLET, 1.0, 0.0, 0.4);
+		// armMat + diagMat removed with arm/diagonal bulb loops
 
-		// 5 TIP bulbs — larger for silhouette anchoring
+		// 5 TIP bulbs — outer vertices (even indices), smaller so star points show through
 		for (let i = 0; i < points; i++) {
 			const v = verts[i * 2];
 			const b = MeshBuilder.CreateSphere(
 				`bulb_tip_${i}`,
-				{ diameter: 0.18, segments: 12 },
+				{ diameter: 0.12, segments: 12 },
 				this.scene,
 			);
 			b.position = new Vector3(v.x, surfaceY, v.z);
@@ -271,10 +260,10 @@ export class StarScene {
 			bulbs.push(b);
 		}
 
-		// 1 CENTER bulb — largest single point
+		// 1 CENTER bulb — steady, no pulse (min==max in CATEGORY_RHYTHM)
 		const cb = MeshBuilder.CreateSphere(
 			"bulb_center",
-			{ diameter: 0.22, segments: 12 },
+			{ diameter: 0.15, segments: 12 },
 			this.scene,
 		);
 		cb.position = new Vector3(0, surfaceY, 0);
@@ -282,34 +271,7 @@ export class StarScene {
 		cb.metadata = { category: "center", index: 0 } satisfies BulbMetadata;
 		bulbs.push(cb);
 
-		// 5 ARM bulbs — decorative filler
-		const armT = 0.45;
-		for (let i = 0; i < points; i++) {
-			const v = verts[i * 2];
-			const b = MeshBuilder.CreateSphere(
-				`bulb_arm_${i}`,
-				{ diameter: 0.065, segments: 10 },
-				this.scene,
-			);
-			b.position = new Vector3(v.x * armT, surfaceY, v.z * armT);
-			b.material = armMat;
-			b.metadata = { category: "arm", index: i } satisfies BulbMetadata;
-			bulbs.push(b);
-		}
-
-		// 5 DIAGONAL bulbs — inner valley accent
-		for (let i = 0; i < points; i++) {
-			const v = verts[i * 2 + 1];
-			const b = MeshBuilder.CreateSphere(
-				`bulb_diag_${i}`,
-				{ diameter: 0.07, segments: 10 },
-				this.scene,
-			);
-			b.position = new Vector3(v.x, surfaceY + 0.02, v.z);
-			b.material = diagMat;
-			b.metadata = { category: "diagonal", index: i } satisfies BulbMetadata;
-			bulbs.push(b);
-		}
+		// Arm bulbs (5) and diagonal bulbs (5) removed — contributed to blob at small size
 
 		return bulbs;
 	}
@@ -351,8 +313,8 @@ export class StarScene {
 
 	private attachGlowLayer(): void {
 		this.glow = new GlowLayer("glow", this.scene, { mainTextureSamples: 2 });
-		// Fixed intensity — context is always a dark nav surface
-		this.glow.intensity = 1.2;
+		// Reduced from 1.2 — fewer emitters means less bloom needed to read
+		this.glow.intensity = 0.6;
 		// Star body excluded — stays matte
 		this.glow.referenceMeshToUseItsOwnMaterial(this.star);
 	}
