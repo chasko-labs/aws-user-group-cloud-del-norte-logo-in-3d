@@ -3,6 +3,12 @@
 // and staggered breathing animation. No external assets — built from VertexData
 // and primitives at runtime.
 
+// Side-effect: patches Scene.prototype.beginAnimation. Required because in
+// some bundling/load-order scenarios this prototype method may not be patched
+// by other chunks (e.g., StarScene loads before background-viz dune scene
+// in dark-mode startup, reduced-motion, or software-rendering paths).
+import "@babylonjs/core/Animations/animatable.js";
+
 import { Engine } from "@babylonjs/core/Engines/engine";
 import { Scene } from "@babylonjs/core/scene";
 import { ArcRotateCamera } from "@babylonjs/core/Cameras/arcRotateCamera";
